@@ -341,7 +341,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         )
 
         attn_metadata = self.attn_backend.make_metadata(
-            is_prompt=False,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             seqlen_q=None,
