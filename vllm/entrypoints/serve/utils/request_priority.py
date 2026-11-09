@@ -87,7 +87,9 @@ def get_header_priority(raw_request: Request) -> int | None:
         priority = priorities[0].strip(" \t")
         if re.fullmatch(r"[+-]?[0-9]+", priority):
             try:
-                return int(priority)
+                number = int(priority)
+                if -(1 << 63) <= number < (1 << 63):
+                    return number
             except ValueError:
                 pass
 

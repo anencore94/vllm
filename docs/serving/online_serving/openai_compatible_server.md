@@ -164,6 +164,9 @@ Resolution order is:
 4. A valid integer `u` member in the RFC 9218 `Priority` Dictionary, times ten.
 5. The request's default priority (`0`).
 
+The new `X-Priority` header accepts signed 64-bit integers
+(`-9223372036854775808` through `9223372036854775807`). Values outside this
+range follow the same fallback as malformed headers.
 Malformed `X-Priority` values, including comma-joined values, are ignored;
 duplicate `X-Priority` field lines are also ignored, allowing fallback to
 `Priority`. Surrounding spaces/tabs and a leading sign are accepted. Unlike

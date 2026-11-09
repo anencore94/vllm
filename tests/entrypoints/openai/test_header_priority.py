@@ -184,6 +184,30 @@ async def test_header_priority_engine_handoff(
     assert priorities == [expected]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["chat/completions", "completions"])
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (-(1 << 63), -(1 << 63)),
+        ((1 << 63) - 1, (1 << 63) - 1),
+        (-(1 << 63) - 1, 20),
+        (1 << 63, 20),
+        (1 << 64, 20),
+    ],
+)
+async def test_x_priority_wire_range(priority_app, endpoint, value, expected):
+    await test_header_priority_engine_handoff(
+        priority_app,
+        endpoint,
+        "priority",
+        True,
+        {},
+        [("X-Priority", str(value)), ("Priority", "u=2")],
+        expected,
+    )
+
+
 @pytest.mark.parametrize(
     "field,expected",
     [

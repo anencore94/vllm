@@ -14,9 +14,10 @@ from vllm.v1.metrics.loggers import PerEngineStatLoggerAdapter, StatLoggerBase
 from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
 
 
-def test_priority_stats_through_llm(vllm_runner):
+def test_priority_stats_through_llm():
     """Real engine/IPC snapshots reach external loggers without raw labels."""
     from vllm import SamplingParams
+    from vllm.outputs import PoolingRequestOutput, RequestOutput
 
     snapshots = []
 
@@ -33,19 +34,33 @@ def test_priority_stats_through_llm(vllm_runner):
             if scheduler_stats is not None:
                 snapshots.append(scheduler_stats)
 
-    with vllm_runner(
-        "distilbert/distilgpt2",
-        scheduling_policy="priority",
-        max_num_seqs=1,
-        enforce_eager=True,
-        disable_log_stats=False,
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.engine.llm_engine import LLMEngine
+
+    engine = LLMEngine.from_engine_args(
+        EngineArgs(
+            model="distilbert/distilgpt2",
+            scheduling_policy="priority",
+            max_num_seqs=1,
+            enforce_eager=True,
+            disable_log_stats=False,
+        ),
         stat_loggers=[RecordingLogger],
-    ) as runner:
-        outputs = runner.llm.generate(
-            ["Hello"] * 4,
-            SamplingParams(temperature=0, max_tokens=4),
-            priority=[50, 30, 10, -1],
-        )
+        enable_multiprocessing=True,
+    )
+    outputs: list[RequestOutput | PoolingRequestOutput] = []
+    try:
+        for index, priority in enumerate([50, 30, 10, -1]):
+            engine.add_request(
+                str(index),
+                {"prompt_token_ids": [15496]},
+                SamplingParams(temperature=0, max_tokens=4, ignore_eos=True),
+                priority=priority,
+            )
+        while engine.has_unfinished_requests():
+            outputs.extend(output for output in engine.step() if output.finished)
+    finally:
+        engine.engine_core.shutdown()
     assert len(outputs) == 4 and all(output.finished for output in outputs)
     assert snapshots
     assert any(stats.num_running_reqs for stats in snapshots)
