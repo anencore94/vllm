@@ -10,8 +10,59 @@ from tests.plugins.vllm_add_dummy_stat_logger.dummy_stat_logger.dummy_stat_logge
 from tests.utils import wait_for_memory_to_settle
 from vllm.config import CacheConfig
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
-from vllm.v1.metrics.loggers import PerEngineStatLoggerAdapter
+from vllm.v1.metrics.loggers import PerEngineStatLoggerAdapter, StatLoggerBase
 from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+
+
+def test_priority_stats_through_llm(vllm_runner):
+    """Real engine/IPC snapshots reach external loggers without raw labels."""
+    from vllm import SamplingParams
+
+    snapshots = []
+
+    class RecordingLogger(StatLoggerBase):
+        def __init__(self, vllm_config, engine_index=0):
+            pass
+
+        def log_engine_initialized(self):
+            pass
+
+        def record(
+            self, scheduler_stats, iteration_stats, mm_cache_stats=None, engine_idx=0
+        ):
+            if scheduler_stats is not None:
+                snapshots.append(scheduler_stats)
+
+    with vllm_runner(
+        "distilbert/distilgpt2",
+        scheduling_policy="priority",
+        max_num_seqs=1,
+        enforce_eager=True,
+        disable_log_stats=False,
+        stat_loggers=[RecordingLogger],
+    ) as runner:
+        outputs = runner.llm.generate(
+            ["Hello"] * 4,
+            SamplingParams(temperature=0, max_tokens=4),
+            priority=[50, 30, 10, -1],
+        )
+    assert len(outputs) == 4 and all(output.finished for output in outputs)
+    assert snapshots
+    assert any(stats.num_running_reqs for stats in snapshots)
+    assert any(stats.num_waiting_reqs for stats in snapshots)
+    for stats in snapshots:
+        priority = stats.priority_stats
+        assert priority is not None
+        assert sum(priority.running) == stats.num_running_reqs
+        assert sum(priority.waiting) == (
+            stats.num_waiting_reqs + stats.num_skipped_waiting_reqs
+        )
+    assert {stats.priority_stats.worst_running_priority for stats in snapshots} >= {
+        -1,
+        10,
+        30,
+        50,
+    }
 
 
 def _required_utilization(engine_args: AsyncEngineArgs) -> float:

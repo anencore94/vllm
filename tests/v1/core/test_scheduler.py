@@ -4838,7 +4838,8 @@ def test_priority_scheduling_mixed_priority_and_arrival():
     assert scheduled_req_ids == ["3", "2", "1", "0"]
 
 
-def test_priority_scheduling_preemption():
+@pytest.mark.parametrize("victim_priority,trigger_priority", [(50, 0), (5, -1)])
+def test_priority_scheduling_preemption(victim_priority, trigger_priority):
     """Test that under KV block pressure the scheduler preempts the
     lowest-priority *running* request, not the highest-priority one.
 
@@ -4874,7 +4875,7 @@ def test_priority_scheduling_preemption():
     # --- Phase 1: low-priority request starts running ---
     lo1 = create_requests_with_priority(
         num_requests=1,
-        priorities=[5],
+        priorities=[victim_priority],
         arrival_times=[1.0],
         num_tokens=num_tokens,
         req_ids=["lo1"],
@@ -4897,7 +4898,7 @@ def test_priority_scheduling_preemption():
     # --- Phase 2: high-priority request arrives AFTER lo1 is running ---
     hi1 = create_requests_with_priority(
         num_requests=1,
-        priorities=[0],
+        priorities=[trigger_priority],
         arrival_times=[2.0],
         num_tokens=num_tokens,
         req_ids=["hi1"],
@@ -4933,6 +4934,70 @@ def test_priority_scheduling_preemption():
     assert any(req.request_id == "hi1" for req in scheduler.running), (
         "High-priority 'hi1' should still be running"
     )
+    from vllm.v1.metrics.stats import priority_tier_index
+
+    stats = scheduler.make_stats().priority_stats
+    expected = [0] * 16
+    expected[
+        priority_tier_index(victim_priority) * 4 + priority_tier_index(trigger_priority)
+    ] = 1
+    assert stats.preemptions == expected
+    assert stats.worst_running_priority == trigger_priority
+    assert stats.running[priority_tier_index(trigger_priority)] == 1
+    assert stats.waiting[priority_tier_index(victim_priority)] == 1
+    assert scheduler.make_stats().priority_stats.preemptions == [0] * 16
+    assert stats.preemptions == expected  # A drained snapshot must not be mutated.
+
+
+def test_priority_metrics_queues_and_empty_reset():
+    scheduler = create_scheduler_with_priority(max_num_seqs=1)
+    priorities = [-1, 0, 9, 10, 29, 30, 49, 50]
+    requests = create_requests_with_priority(
+        num_requests=len(priorities),
+        priorities=priorities,
+        arrival_times=list(range(len(priorities))),
+        num_tokens=16,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+    assert scheduler.make_stats().priority_stats.waiting == [3, 2, 2, 1]
+    scheduler.schedule()
+    stats = scheduler.make_stats().priority_stats
+    assert stats.running == [1, 0, 0, 0]
+    assert stats.waiting == [2, 2, 2, 1]
+    assert stats.worst_running_priority == -1
+    scheduler.finish_requests(
+        [request.request_id for request in requests], RequestStatus.FINISHED_ABORTED
+    )
+    stats = scheduler.make_stats().priority_stats
+    assert stats.running == stats.waiting == [0] * 4
+    assert stats.worst_running_priority is None
+    assert stats.preemptions == [0] * 16
+
+
+def test_priority_metrics_exclude_self_preemption():
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=1, num_blocks=4, block_size=16
+    )
+    request = create_requests_with_priority(
+        num_requests=1, priorities=[50], num_tokens=48, max_tokens=64
+    )[0]
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            sampled_token_ids=[[100]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    scheduler.schedule()
+    assert request.status == RequestStatus.PREEMPTED
+    assert request.num_preemptions == 1
+    assert scheduler.make_stats().priority_stats.preemptions == [0] * 16
 
 
 def test_priority_scheduling_no_preemption_when_space_available():
