@@ -11,10 +11,12 @@ from vllm.v1.metrics.stats import (
     LoRARequestStates,
     PrefillStats,
     PrefixCacheStats,
+    PriorityStats,
     PromptTokenStats,
     RequestStateStats,
     SchedulerIterationDetails,
     SchedulerStats,
+    priority_tier_index,
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.utils import compute_iteration_details
@@ -23,6 +25,45 @@ from vllm.v1.utils import compute_iteration_details
 def test_iteration_stats_repr():
     iteration_stats = IterationStats()
     assert repr(iteration_stats).startswith("IterationStats(")
+
+
+@pytest.mark.parametrize(
+    ("priority", "tier"),
+    [
+        (-100, 0),
+        (-1, 0),
+        (0, 0),
+        (9, 0),
+        (10, 1),
+        (29, 1),
+        (30, 2),
+        (49, 2),
+        (50, 3),
+        (10**9, 3),
+    ],
+)
+def test_priority_tier_boundaries(priority, tier):
+    assert priority_tier_index(priority) == tier
+
+
+@pytest.mark.parametrize(
+    "priority_stats",
+    [
+        None,
+        PriorityStats(
+            running=[1, 2, 3, 4],
+            waiting=[4, 3, 2, 1],
+            worst_running_priority=-1,
+            preemptions=list(range(16)),
+        ),
+    ],
+)
+def test_priority_stats_wire_roundtrip(priority_stats):
+    outputs = EngineCoreOutputs(
+        scheduler_stats=SchedulerStats(priority_stats=priority_stats)
+    )
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(MsgpackEncoder().encode(outputs))
+    assert decoded.scheduler_stats == outputs.scheduler_stats
 
 
 def test_scheduler_iteration_details_serialization():

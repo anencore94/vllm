@@ -69,8 +69,10 @@ from vllm.v1.metrics.stats import (
     KV_FETCH_STAGES,
     KV_FETCH_WAITING_TO_START,
     PrefixCacheStats,
+    PriorityStats,
     RequestSpecDecodeMetrics,
     SchedulerStats,
+    priority_tier_index,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
@@ -249,6 +251,7 @@ class Scheduler(SchedulerInterface):
 
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
+        self._priority_preemptions = [0] * 16
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -989,6 +992,9 @@ class Scheduler(SchedulerInterface):
                         preempted_req,
                         scheduled_timestamp,
                         drop_stale_output=self.requires_kv_delivery,
+                        trigger_priority=(
+                            request.priority if preempted_req is not request else None
+                        ),
                     )
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
@@ -1851,7 +1857,11 @@ class Scheduler(SchedulerInterface):
         return new_block_ids_to_zero or None
 
     def _preempt_request(
-        self, request: Request, timestamp: float, drop_stale_output: bool = False
+        self,
+        request: Request,
+        timestamp: float,
+        drop_stale_output: bool = False,
+        trigger_priority: int | None = None,
     ) -> None:
         """Preempt a request and put it back to the waiting queue.
 
@@ -1891,6 +1901,15 @@ class Scheduler(SchedulerInterface):
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+            if (
+                self.policy == SchedulingPolicy.PRIORITY
+                and trigger_priority is not None
+                and trigger_priority < request.priority
+            ):
+                pair_index = priority_tier_index(
+                    request.priority
+                ) * 4 + priority_tier_index(trigger_priority)
+                self._priority_preemptions[pair_index] += 1
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
@@ -3420,6 +3439,19 @@ class Scheduler(SchedulerInterface):
         )
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
+        priority_stats = None
+        if self.policy == SchedulingPolicy.PRIORITY:
+            priority_stats = PriorityStats(preemptions=self._priority_preemptions)
+            self._priority_preemptions = [0] * 16
+            for request in self.running:
+                priority_stats.running[priority_tier_index(request.priority)] += 1
+            priority_stats.worst_running_priority = max(
+                (request.priority for request in self.running), default=None
+            )
+            for request in itertools.chain(
+                self.waiting, self.kv_holding_waiting, self.async_kv_waiting
+            ):
+                priority_stats.waiting[priority_tier_index(request.priority)] += 1
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
@@ -3434,6 +3466,7 @@ class Scheduler(SchedulerInterface):
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
             ec_connector_stats=ec_connector_stats_payload,
+            priority_stats=priority_stats,
         )
 
     def make_spec_decoding_stats(
