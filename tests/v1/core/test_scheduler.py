@@ -4934,9 +4934,27 @@ def test_priority_scheduling_preemption(victim_priority, trigger_priority):
     assert any(req.request_id == "hi1" for req in scheduler.running), (
         "High-priority 'hi1' should still be running"
     )
-    from vllm.v1.metrics.stats import priority_tier_index
+    from prometheus_client import REGISTRY
 
-    stats = scheduler.make_stats().priority_stats
+    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.metrics.loggers import PrometheusStatLogger
+    from vllm.v1.metrics.stats import PRIORITY_TIERS, priority_tier_index
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+    core_outputs = scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["hi1"],
+            sampled_token_ids=[[101]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(
+        MsgpackEncoder().encode(core_outputs[0])
+    )
+    stats = decoded.scheduler_stats.priority_stats
     expected = [0] * 16
     expected[
         priority_tier_index(victim_priority) * 4 + priority_tier_index(trigger_priority)
@@ -4947,6 +4965,41 @@ def test_priority_scheduling_preemption(victim_priority, trigger_priority):
     assert stats.waiting[priority_tier_index(victim_priority)] == 1
     assert scheduler.make_stats().priority_stats.preemptions == [0] * 16
     assert stats.preemptions == expected  # A drained snapshot must not be mutated.
+
+    logger = PrometheusStatLogger(scheduler.vllm_config)
+    logger.record(decoded.scheduler_stats, None)
+    labels = {
+        "model_name": scheduler.vllm_config.model_config.served_model_name,
+        "engine": "0",
+    }
+    pair_labels = {
+        **labels,
+        "victim_tier": PRIORITY_TIERS[priority_tier_index(victim_priority)],
+        "trigger_tier": PRIORITY_TIERS[priority_tier_index(trigger_priority)],
+    }
+    assert REGISTRY.get_sample_value("vllm:preemptions_total", pair_labels) == 1
+    for name, counts in (("running", stats.running), ("waiting", stats.waiting)):
+        for tier, count in zip(PRIORITY_TIERS, counts):
+            assert (
+                REGISTRY.get_sample_value(
+                    f"vllm:num_requests_{name}_by_tier", {**labels, "tier": tier}
+                )
+                == count
+            )
+    logger.record(scheduler.make_stats(), None)
+    assert REGISTRY.get_sample_value("vllm:preemptions_total", pair_labels) == 1
+    scheduler.finish_requests(["lo1", "hi1"], RequestStatus.FINISHED_ABORTED)
+    logger.record(scheduler.make_stats(), None)
+    for name in ("running", "waiting"):
+        for tier in PRIORITY_TIERS:
+            assert (
+                REGISTRY.get_sample_value(
+                    f"vllm:num_requests_{name}_by_tier", {**labels, "tier": tier}
+                )
+                == 0
+            )
+    assert REGISTRY.get_sample_value("vllm:lowest_running_priority_value", labels) == 0
+    assert REGISTRY.get_sample_value("vllm:preemptions_total", pair_labels) == 1
 
 
 def test_priority_metrics_queues_and_empty_reset():
