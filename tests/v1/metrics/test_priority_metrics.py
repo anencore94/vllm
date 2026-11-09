@@ -77,7 +77,19 @@ def test_priority_registry_cardinality_and_reset():
             None,
         )
         if index % 100 == 0:
-            assert len(_samples()) == 2 * (4 + 4 + 1 + 16)
+            samples = _samples()
+            assert len(samples) == 2 * (4 + 4 + 1 + 16)
+            for name, count in (("running", 1), ("waiting", 2)):
+                for sample in samples:
+                    if sample.name == f"vllm:num_requests_{name}_by_tier":
+                        expected = (
+                            count
+                            if sample.labels["engine"] == "0"
+                            and sample.labels["tier"]
+                            == PRIORITY_TIERS[priority_tier_index(priority)]
+                            else 0
+                        )
+                        assert sample.value == expected
 
     samples = _samples()
     assert all(
