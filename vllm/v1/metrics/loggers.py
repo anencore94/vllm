@@ -28,6 +28,7 @@ from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
     KV_FETCH_STAGES,
+    PRIORITY_TIERS,
     CachingMetrics,
     IterationStats,
     MultiModalCacheStats,
@@ -549,6 +550,63 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_scheduler_waiting = create_metric_per_engine(
             gauge_scheduler_waiting, per_engine_labelvalues
         )
+
+        self.gauge_running_by_tier: dict[str, dict[int, Gauge]] = {}
+        self.gauge_waiting_by_tier: dict[str, dict[int, Gauge]] = {}
+        self.gauge_worst_running_priority: dict[int, Gauge] = {}
+        self.counter_priority_preemptions: dict[
+            tuple[str, str], dict[int, Counter]
+        ] = {}
+        if vllm_config.scheduler_config.policy == "priority":
+            for name, gauges in (
+                ("running", self.gauge_running_by_tier),
+                ("waiting", self.gauge_waiting_by_tier),
+            ):
+                gauge = self._gauge_cls(
+                    name=f"vllm:num_requests_{name}_by_tier",
+                    documentation=f"{name.title()} requests by bounded priority tier.",
+                    multiprocess_mode="mostrecent",
+                    labelnames=labelnames + ["tier"],
+                )
+                for tier in PRIORITY_TIERS:
+                    gauges[tier] = create_metric_per_engine(
+                        gauge,
+                        {
+                            idx: values + [tier]
+                            for idx, values in per_engine_labelvalues.items()
+                        },
+                    )
+            self.gauge_worst_running_priority = create_metric_per_engine(
+                self._gauge_cls(
+                    name="vllm:lowest_running_priority_value",
+                    documentation=(
+                        "Worst (largest) raw running priority; zero when empty. "
+                        "Interpret with vllm:num_requests_running."
+                    ),
+                    multiprocess_mode="mostrecent",
+                    labelnames=labelnames,
+                ),
+                per_engine_labelvalues,
+            )
+            counter = self._counter_cls(
+                name="vllm:preemptions",
+                documentation=(
+                    "Actual priority preemptions with an attributable higher-priority "
+                    "trigger, by bounded victim and trigger tiers."
+                ),
+                labelnames=labelnames + ["victim_tier", "trigger_tier"],
+            )
+            for victim in PRIORITY_TIERS:
+                for trigger in PRIORITY_TIERS:
+                    self.counter_priority_preemptions[victim, trigger] = (
+                        create_metric_per_engine(
+                            counter,
+                            {
+                                idx: values + [victim, trigger]
+                                for idx, values in per_engine_labelvalues.items()
+                            },
+                        )
+                    )
 
         gauge_waiting_by_reason = self._gauge_cls(
             name="vllm:num_requests_waiting_by_reason",
@@ -1158,6 +1216,26 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 + scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_scheduler_waiting[engine_idx].set(total_waiting)
+            priority_stats = scheduler_stats.priority_stats
+            if self.gauge_worst_running_priority:
+                for index, tier in enumerate(PRIORITY_TIERS):
+                    self.gauge_running_by_tier[tier][engine_idx].set(
+                        priority_stats.running[index] if priority_stats else 0
+                    )
+                    self.gauge_waiting_by_tier[tier][engine_idx].set(
+                        priority_stats.waiting[index] if priority_stats else 0
+                    )
+                    if priority_stats is not None:
+                        for trigger_index, trigger in enumerate(PRIORITY_TIERS):
+                            self.counter_priority_preemptions[tier, trigger][
+                                engine_idx
+                            ].inc(priority_stats.preemptions[index * 4 + trigger_index])
+                self.gauge_worst_running_priority[engine_idx].set(
+                    priority_stats.worst_running_priority
+                    if priority_stats
+                    and priority_stats.worst_running_priority is not None
+                    else 0
+                )
             self.gauge_waiting_by_reason[WAITING_REASON_CAPACITY][engine_idx].set(
                 scheduler_stats.num_waiting_reqs
             )

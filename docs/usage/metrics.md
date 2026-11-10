@@ -37,6 +37,45 @@ The following metrics are exposed:
 
 --8<-- "gen:metrics-general"
 
+### Priority scheduling metrics
+
+With `--scheduling-policy priority` (not the default `fcfs`), `/metrics` also
+exports per-model, per-engine queue snapshots and attributable preemptions:
+
+| Metric | Meaning |
+| --- | --- |
+| `vllm:num_requests_waiting_by_tier{tier}` | All waiting requests, including deferred and KV-transfer waiting queues. |
+| `vllm:num_requests_running_by_tier{tier}` | Requests in the scheduler's actual running queue. |
+| `vllm:lowest_running_priority_value` | Largest (worst) raw running priority; zero when empty. Check `vllm:num_requests_running` to distinguish an empty queue from priority zero. |
+| `vllm:preemptions_total{victim_tier,trigger_tier}` | Actual evictions for an identified, strictly higher-priority request needing KV space. |
+
+The only tier label values are `P0_Critical` (below 10), `P1_High` (10–29),
+`P2_Normal` (30–49), and `P3_Batch` (50 and above). Negative priorities are
+valid and map to `P0_Critical`; scheduling values are never clamped or changed.
+Raw priorities appear only as a gauge value, never as labels. Queue gauges
+reset all four tiers on every stats update, including when queues become empty.
+Storage is bounded to four running and four waiting series, one worst-priority
+series, and sixteen victim/trigger pairs per model/engine (plus counter
+creation timestamps in single-process exposition).
+
+The pair counter observes the existing V1 running-request allocation path;
+it does not introduce waiting-request preemption. Self-preemption, equal-priority
+evictions, prefix-cache resets, and events without a known trigger are not
+attributed. The existing `vllm:num_preemptions_total` remains unchanged and
+includes generic memory preemptions; the pair counter is not a breakdown that
+must sum to that total. Pair deltas are drained per scheduler stats update,
+not reconstructed from resumed requests or guesses about the waiting head.
+
+These metrics follow the existing pipeline: engine stats are forwarded to the
+frontend, where Prometheus collectors are registered. Gauges use `mostrecent`
+multiprocess aggregation (not sums of duplicate frontend snapshots); counters
+are summed by the Prometheus multiprocess collector. Engine labels remain
+separate: sum queue gauges across engines, but take the maximum nonempty
+engine's worst-priority value rather than summing it. Independent server
+replicas must use independent multiprocess directories and scrape targets.
+Stats snapshots and deltas require matching engine/frontend versions; external
+stat loggers may ignore the optional `SchedulerStats.priority_stats` field.
+
 ## Speculative Decoding Metrics
 
 --8<-- "gen:metrics-spec-decode"

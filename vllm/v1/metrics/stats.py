@@ -219,6 +219,30 @@ KV_FETCH_STAGES = (
 )
 
 
+PRIORITY_TIERS = ("P0_Critical", "P1_High", "P2_Normal", "P3_Batch")
+
+
+def priority_tier_index(priority: int) -> int:
+    if priority < 10:
+        return 0
+    if priority < 30:
+        return 1
+    if priority < 50:
+        return 2
+    return 3
+
+
+@dataclass
+class PriorityStats:
+    """Fixed-size queue snapshots and preemption deltas, in PRIORITY_TIERS order."""
+
+    running: list[int] = field(default_factory=lambda: [0] * 4)
+    waiting: list[int] = field(default_factory=lambda: [0] * 4)
+    worst_running_priority: int | None = None
+    # Row-major victim tier x trigger tier; drained on each scheduler stats update.
+    preemptions: list[int] = field(default_factory=lambda: [0] * 16)
+
+
 @dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
@@ -253,6 +277,8 @@ class SchedulerStats:
     cudagraph_stats: CUDAGraphStat | None = None
 
     perf_stats: PerfStats | None = None
+
+    priority_stats: PriorityStats | None = None
 
 
 @dataclass
